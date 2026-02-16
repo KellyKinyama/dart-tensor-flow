@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import '../core/tensor.dart';
-import 'model.dart';
+import 'model2.dart';
 
 class MCTSNode {
   final Tensor state;
@@ -26,7 +26,7 @@ class MuZeroSearch {
 
   MuZeroSearch(this.model);
 
-  /// Runs the search for a fixed number of simulations
+  /// Main entry point for playing: Runs simulations and returns the best move.
   int search(
     Tensor rootState,
     List<int> legalActions, {
@@ -34,12 +34,16 @@ class MuZeroSearch {
   }) {
     MCTSNode root = MCTSNode(rootState);
 
-    // Initial expansion of the root
+    // Initial expansion of the root with legal move filtering
     final prediction = model.predict(rootState);
-    root.priors = _filterPriors(prediction['policy']!.data, legalActions);
+    root.priors = filterPriors(prediction['policy']!.data, legalActions);
 
     for (int i = 0; i < numSimulations; i++) {
-      _runSimulation(root);
+      runSimulation(root);
+    }
+
+    if (root.visitCounts.isEmpty) {
+      return legalActions.isNotEmpty ? legalActions.first : 0;
     }
 
     // Return the action with the highest visit count
@@ -48,17 +52,40 @@ class MuZeroSearch {
         .key;
   }
 
-  void _runSimulation(MCTSNode root) {
+  /// Public version of prior filtering used by the Trainer
+  Map<int, double> filterPriors(List<double> logits, List<int> legalActions) {
+    if (legalActions.isEmpty) return {};
+
+    double maxLogit = -double.infinity;
+    for (int action in legalActions) {
+      if (logits[action] > maxLogit) maxLogit = logits[action];
+    }
+
+    Map<int, double> priors = {};
+    double sumExp = 0;
+    for (int action in legalActions) {
+      double p = math.exp((logits[action] - maxLogit).clamp(-10, 10));
+      priors[action] = p;
+      sumExp += p;
+    }
+
+    for (int action in legalActions) {
+      priors[action] = priors[action]! / (sumExp + 1e-10);
+    }
+
+    return priors;
+  }
+
+  /// Performs a single MCTS simulation (Select -> Expand -> Evaluate -> Backup)
+  void runSimulation(MCTSNode root) {
     MCTSNode current = root;
     List<MCTSNode> searchPath = [current];
     List<int> actionPath = [];
 
-    // 1. SELECT: Traverse the tree using UCB until we hit a node
-    // that hasn't fully expanded its children.
+    // 1. SELECT: Follow UCB until we find a leaf or an unexplored action
     while (current.children.isNotEmpty) {
       int action = _selectAction(current);
 
-      // If we haven't explored this action yet, stop selecting and start expanding
       if (!current.children.containsKey(action)) {
         actionPath.add(action);
         break;
@@ -69,29 +96,40 @@ class MuZeroSearch {
       searchPath.add(current);
     }
 
-    // 2. EXPAND: If the path is empty (first simulation), pick the best prior
+    // 2. Handle first simulation or root-only expansion
     if (actionPath.isEmpty) {
       actionPath.add(_selectAction(current));
     }
 
-    // 3. EVALUATE: Use the Dynamics Head
+    // 3. EXPAND & BACKUP: Internal call to the dynamics head and backprop
+    _expandAndBackpropagate(searchPath, actionPath);
+  }
+
+  void _expandAndBackpropagate(
+    List<MCTSNode> searchPath,
+    List<int> actionPath,
+  ) {
     int lastAction = actionPath.last;
     MCTSNode parent = searchPath.last;
 
+    // Dynamics prediction (The "Imagination")
     final dynamicsResult = model.dynamics(parent.state, lastAction);
     Tensor nextState = dynamicsResult['state']!;
     double reward = dynamicsResult['reward']!.data[0];
 
+    // Inference on the new state
     final prediction = model.predict(nextState);
     double value = prediction['value']!.data[0];
 
-    // 4. ADD NEW NODE
+    // Create the leaf node
     MCTSNode newNode = MCTSNode(nextState);
     newNode.priors = _softmax(prediction['policy']!.data);
+
+    // Expansion
     parent.children[lastAction] = newNode;
     parent.rewards[lastAction] = reward;
 
-    // 5. BACKUP
+    // Backpropagate the value up the search path
     _backpropagate(searchPath, actionPath, value);
   }
 
@@ -99,7 +137,6 @@ class MuZeroSearch {
     double bestScore = -double.infinity;
     int bestAction = -1;
 
-    // Sum total visits across all possible actions in priors
     int totalVisits = node.visitCounts.values.fold(0, (a, b) => a + b);
 
     for (var action in node.priors.keys) {
@@ -110,7 +147,6 @@ class MuZeroSearch {
       }
     }
 
-    // Fallback if something goes wrong
     return bestAction != -1 ? bestAction : node.priors.keys.first;
   }
 
@@ -119,7 +155,7 @@ class MuZeroSearch {
     double visitCount = (node.visitCounts[action] ?? 0).toDouble();
     double qValue = node.getQ(action);
 
-    // Upper Confidence Bound formula
+    // Standard MuZero PUCT formula
     double pb_c =
         math.log((totalVisits + pb_c_base + 1) / pb_c_base) + pb_c_init;
     pb_c *= math.sqrt(totalVisits) / (visitCount + 1);
@@ -136,43 +172,25 @@ class MuZeroSearch {
         path[i].valueSums[action] =
             (path[i].valueSums[action] ?? 0) + cumulativeValue;
 
-        // Add immediate reward from dynamics
+        // Cumulative reward: R + discount * V
         cumulativeValue =
             (path[i].rewards[action] ?? 0) + discount * cumulativeValue;
       }
     }
   }
 
-  Map<int, double> _filterPriors(List<double> logits, List<int> legalActions) {
-    // Apply softmax only to legal moves
-    double maxLogit = -double.infinity;
-    for (int act in legalActions)
-      if (logits[act] > maxLogit) maxLogit = logits[act];
-
-    double sum = 0;
-    Map<int, double> filtered = {};
-    for (int act in legalActions) {
-      double p = math.exp(logits[act] - maxLogit);
-      filtered[act] = p;
-      sum += p;
-    }
-    filtered.updateAll((k, v) => v / sum);
-    return filtered;
-  }
-
   Map<int, double> _softmax(List<double> logits) {
     double maxLogit = logits.reduce(math.max);
     double sum = 0;
-    List<double> exps = logits.map((l) {
-      double e = math.exp(l - maxLogit);
-      sum += e;
-      return e;
-    }).toList();
-
     Map<int, double> result = {};
-    for (int i = 0; i < exps.length; i++) {
-      result[i] = exps[i] / sum;
+
+    for (int i = 0; i < logits.length; i++) {
+      double e = math.exp((logits[i] - maxLogit).clamp(-10, 10));
+      result[i] = e;
+      sum += e;
     }
+
+    result.updateAll((k, v) => v / (sum + 1e-10));
     return result;
   }
 }
