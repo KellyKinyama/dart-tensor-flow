@@ -1,3 +1,5 @@
+import 'package:dart_tensor_flow/uitils/network_utils.dart';
+
 import 'trainer3.dart';
 import 'model2.dart';
 import '../transformers/attention_free_transformer/aft_chessformer.dart';
@@ -53,10 +55,12 @@ void main() async {
     );
     print("------------------------------------------");
 
+    const String checkpointPath = "muzero_chess_v1.json";
+    await saveModuleParameters(transformer, checkpointPath);
     // 5. Checkpointing
-    if (cycle % 10 == 0) {
-      _saveModelWeights(model, cycle);
-    }
+    // if (cycle % 10 == 0) {
+    //   _saveModelWeights(model, cycle);
+    // }
   }
 }
 

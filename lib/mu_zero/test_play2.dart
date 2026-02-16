@@ -2,7 +2,7 @@ import 'dart:io';
 import 'package:bishop/bishop.dart';
 import 'package:dart_tensor_flow/uitils/network_utils.dart';
 import '../transformers/attention_free_transformer/aft_chessformer.dart';
-import 'model.dart';
+import 'model2.dart';
 import 'mcts.dart'; // Import the search logic
 
 // ... [Keep encodeMove and decodeMove helpers from your previous snippet] ...
