@@ -70,6 +70,37 @@ class Tensor {
     return t;
   }
 
+  /// Returns a new Tensor with a different shape but the same data.
+  Tensor reshape(List<int> newShape) {
+    // 1. Validation: Ensure the total number of elements matches
+    int newLength = newShape.isEmpty ? 0 : newShape.reduce((a, b) => a * b);
+    if (newLength != length) {
+      throw ArgumentError(
+        "Cannot reshape Tensor of length $length into shape $newShape (length $newLength)",
+      );
+    }
+
+    // 2. Create the output tensor as a child of this one
+    final out = Tensor(newShape, children: {this});
+
+    // 3. Forward Pass: Share/Copy the data
+    // In a more optimized version, we would share the Float32List,
+    // but for this autograd graph, we'll copy to keep buffers distinct.
+    for (int i = 0; i < length; i++) {
+      out.data[i] = data[i];
+    }
+
+    // 4. Backward Pass: Gradients from the reshaped tensor
+    // flow directly back to the original indices.
+    out.onBackward = () {
+      for (int i = 0; i < length; i++) {
+        this.grad[i] += out.grad[i];
+      }
+    };
+
+    return out;
+  }
+
   // --- Basic Operators ---
 
   Tensor operator +(dynamic other) {
@@ -200,14 +231,55 @@ class Tensor {
 
   // --- Matrix Multiplication ---
 
+  // Tensor matmul(Tensor other) {
+  //   assert(
+  //     shape[1] == other.shape[0],
+  //     "Dimension mismatch: ${shape[1]} != ${other.shape[0]}",
+  //   );
+
+  //   // CRITICAL: Capture 'this' and 'other' as local final variables.
+  //   // This ensures the backward closure points to the EXACT weight buffers.
+  //   final Tensor input = this;
+  //   final Tensor weights = other;
+
+  //   int M = shape[0];
+  //   int K = shape[1];
+  //   int N = other.shape[1];
+
+  //   final out = Tensor([M, N], children: {input, weights});
+
+  //   // Forward Pass
+  //   for (int i = 0; i < M; i++) {
+  //     for (int k = 0; k < K; k++) {
+  //       for (int j = 0; j < N; j++) {
+  //         out.data[i * N + j] +=
+  //             input.data[i * K + k] * weights.data[k * N + j];
+  //       }
+  //     }
+  //   }
+
+  //   // Backward Pass
+  //   out.onBackward = () {
+  //     for (int i = 0; i < M; i++) {
+  //       for (int k = 0; k < K; k++) {
+  //         for (int j = 0; j < N; j++) {
+  //           double gradOut = out.grad[i * N + j];
+  //           // Update the locally captured weight and input tensors
+  //           input.grad[i * K + k] += weights.data[k * N + j] * gradOut;
+  //           weights.grad[k * N + j] += input.data[i * K + k] * gradOut;
+  //         }
+  //       }
+  //     }
+  //   };
+  //   return out;
+  // }
+
   Tensor matmul(Tensor other) {
     assert(
       shape[1] == other.shape[0],
       "Dimension mismatch: ${shape[1]} != ${other.shape[0]}",
     );
 
-    // CRITICAL: Capture 'this' and 'other' as local final variables.
-    // This ensures the backward closure points to the EXACT weight buffers.
     final Tensor input = this;
     final Tensor weights = other;
 
@@ -217,29 +289,97 @@ class Tensor {
 
     final out = Tensor([M, N], children: {input, weights});
 
-    // Forward Pass
+    // Create SIMD views of the underlying buffers.
+    // This is O(1) and does not copy the data.
+    final Float32x4List weightsSimd = Float32x4List.view(weights.data.buffer);
+    final Float32x4List outSimd = Float32x4List.view(out.data.buffer);
+
+    // --- Forward Pass ---
     for (int i = 0; i < M; i++) {
       for (int k = 0; k < K; k++) {
-        for (int j = 0; j < N; j++) {
-          out.data[i * N + j] +=
-              input.data[i * K + k] * weights.data[k * N + j];
+        final double aVal = input.data[i * K + k];
+        if (aVal == 0) continue;
+
+        final aSimd = Float32x4(aVal, aVal, aVal, aVal);
+
+        // Vector index (j/4) because Float32x4List looks at 4 floats at a time
+        int simdN = N ~/ 4;
+        int bOffsetSimd = (k * N) ~/ 4;
+        int cOffsetSimd = (i * N) ~/ 4;
+
+        // 1. SIMD Loop (4 elements at a time)
+        for (int j = 0; j < simdN; j++) {
+          outSimd[cOffsetSimd + j] += aSimd * weightsSimd[bOffsetSimd + j];
+        }
+
+        // 2. Scalar Tail (Handle the remainder if N is not divisible by 4)
+        for (int j = simdN * 4; j < N; j++) {
+          out.data[i * N + j] += aVal * weights.data[k * N + j];
         }
       }
     }
 
-    // Backward Pass
+    // --- Backward Pass (Optimized IKJ + SIMD) ---
     out.onBackward = () {
+      // Create SIMD views of the gradients and data
+      final Float32x4List outGradSimd = Float32x4List.view(out.grad.buffer);
+      final Float32x4List weightsDataSimd = Float32x4List.view(
+        weights.data.buffer,
+      );
+      final Float32x4List weightsGradSimd = Float32x4List.view(
+        weights.grad.buffer,
+      );
+
+      int simdN = N ~/ 4;
+
       for (int i = 0; i < M; i++) {
         for (int k = 0; k < K; k++) {
-          for (int j = 0; j < N; j++) {
-            double gradOut = out.grad[i * N + j];
-            // Update the locally captured weight and input tensors
-            input.grad[i * K + k] += weights.data[k * N + j] * gradOut;
-            weights.grad[k * N + j] += input.data[i * K + k] * gradOut;
+          int cOffset = i * N;
+          int bOffset = k * N;
+
+          int cOffsetSimd = cOffset ~/ 4;
+          int bOffsetSimd = bOffset ~/ 4;
+
+          // --- 1. Calculate input.grad[i, k] ---
+          // This is a dot product: sum(out.grad[i, :] * weights.data[k, :])
+          Float32x4 sumSimd = Float32x4.zero();
+
+          for (int j = 0; j < simdN; j++) {
+            final gSimd = outGradSimd[cOffsetSimd + j];
+            final wSimd = weightsDataSimd[bOffsetSimd + j];
+            sumSimd += gSimd * wSimd;
+          }
+
+          // Horizontal add of the 4 lanes in the SIMD register
+          double sumGrad = sumSimd.x + sumSimd.y + sumSimd.z + sumSimd.w;
+
+          // Scalar tail for input.grad
+          for (int j = simdN * 4; j < N; j++) {
+            sumGrad += out.grad[cOffset + j] * weights.data[bOffset + j];
+          }
+          input.grad[i * K + k] += sumGrad;
+
+          // --- 2. Calculate weights.grad[k, j] ---
+          // formula: weights.grad += input.data[i, k] * out.grad[i, j]
+          final double aVal = input.data[i * K + k];
+          if (aVal != 0) {
+            final aSimd = Float32x4(aVal, aVal, aVal, aVal);
+
+            for (int j = 0; j < simdN; j++) {
+              final gSimd = outGradSimd[cOffsetSimd + j];
+              // Update weights.grad SIMD lane
+              weightsGradSimd[bOffsetSimd + j] += aSimd * gSimd;
+            }
+
+            // Scalar tail for weights.grad
+            for (int j = simdN * 4; j < N; j++) {
+              weights.grad[bOffset + j] += aVal * out.grad[cOffset + j];
+            }
           }
         }
       }
     };
+
     return out;
   }
 
@@ -775,4 +915,18 @@ void main() {
   out10.backward();
   print('out10: ${out10.data[0]}  // Expected: 6.25');
   print('x10: ${x10.grad[0]}  // Expected: 5.0');
+
+  print('\n--- Example 15: Reshape and Backprop ---');
+  // Start with a 1x4 vector
+  final x11 = Tensor.fill([1, 4], 2.0);
+  // Reshape to 2x2
+  final reshaped = x11.reshape([2, 2]);
+  // Perform an operation on the reshaped version
+  final out11 = reshaped * 3.0;
+
+  out11.backward();
+
+  print('reshaped shape: ${reshaped.shape}'); // Expected: [2, 2]
+  print('out11 data[0]: ${out11.data[0]}'); // Expected: 6.0
+  print('x11 grad[0]: ${x11.grad[0]}'); // Expected: 3.0
 }
