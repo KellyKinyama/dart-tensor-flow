@@ -1,0 +1,94 @@
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import '../core/module.dart';
+import '../core/tensor.dart';
+
+/// Saves the parameters (weights) of a given Module to a JSON file.
+///
+/// The parameters are extracted as a list of double values from the
+/// `Module.parameters()` method and then encoded as a JSON array.
+///
+/// [module]: The Module instance whose parameters are to be saved.
+/// [filePath]: The path to the file where the weights will be saved.
+/// Saves the parameters (weights) of a given Module to a JSON file.
+///
+/// The parameters are extracted as a list of double values from the
+/// `Module.parameters()` method and then encoded as a JSON array.
+///
+/// [module]: The Module instance whose parameters are to be saved.
+/// [filePath]: The path to the file where the weights will be saved.
+Future<void> saveModuleParameters(Module module, String filePath) async {
+  final List<Tensor> parameters = module.parameters();
+  final List<Float32List> weightsData = parameters.map((v) => v.data).toList();
+
+  final String jsonString = jsonEncode(weightsData);
+  final File file = File(filePath);
+
+  try {
+    await file.writeAsString(jsonString);
+    print('Weights successfully saved to: $filePath');
+  } catch (e) {
+    print('Error saving weights to $filePath: $e');
+  }
+}
+
+/// Loads parameters (weights) from a JSON file into a given Module.
+///
+/// The function reads a JSON array of doubles from the specified file
+/// and then iterates through the Module's parameters, updating their `data` field.
+/// It's crucial that the order of parameters when saving matches the order when loading.
+///
+/// [module]: The Module instance whose parameters are to be loaded.
+/// [filePath]: The path to the file from which the weights will be loaded.
+Future<void> loadModuleParameters(Module module, String filePath) async {
+  final File file = File(filePath);
+
+  if (!await file.exists()) {
+    print('Error: File not found at $filePath');
+    return;
+  }
+
+  try {
+    final String jsonString = await file.readAsString();
+    final List<dynamic> loadedData = jsonDecode(
+      jsonString,
+    ); // jsonDecode returns List<dynamic>
+
+    final List<Tensor> moduleParameters = module.parameters();
+
+    if (loadedData.length != moduleParameters.length) {
+      print(
+        'Warning: Mismatch in number of parameters. '
+        'Loaded: ${loadedData.length}, Expected: ${moduleParameters.length}',
+      );
+    }
+
+    // Update the data of each Value object in the module's parameters
+    for (int i = 0; i < moduleParameters.length && i < loadedData.length; i++) {
+      // Explicitly convert the dynamic value to double
+      // print("loadedData[i] ${loadedData[i].runtimeType}");
+      if (loadedData[i] is List<dynamic>) {
+        loadedData[i] = loadedData[i] as List<dynamic>;
+        // moduleParameters[i].data = ((loadedData[i] as Float32List));
+        for (int j = 0; j < loadedData[i].length; j++) {
+          if (loadedData[i][j] is! num) {
+            throw Exception("Invalid type: ${loadedData[i][j].runtimeType}");
+          }
+          // print("loadedData ${loadedData[i][j].runtimeType}");
+          moduleParameters[i].data[j] = loadedData[i][j] as double;
+        }
+      } else {
+        throw Exception(
+          'Error: Expected a number at index $i, but got ${loadedData[i].runtimeType}',
+        );
+        // You might want to handle this error more robustly, e.g., throw an exception
+      }
+    }
+    print('Weights successfully loaded from: $filePath');
+  } catch (e) {
+    print('Error loading weights from $filePath: $e');
+  }
+}
