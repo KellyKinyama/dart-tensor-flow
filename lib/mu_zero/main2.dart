@@ -8,7 +8,10 @@ import '../optimizers/adam_chess.dart';
 void main() async {
   // 1. Initialize Architecture
   // vocabSize 4098 accounts for 64x64 moves + special tokens
+
+  const String checkpointPath = "muzero_chess_v1.json";
   final transformer = TransformerDecoder(vocabSize: 4098, embedSize: 128);
+  await loadModuleParameters(transformer, checkpointPath);
   final model = MuZeroModel(transformer, 128);
   final optimizer = Adam(transformer.parameters());
   final trainer = MuZeroTrainer(model, optimizer);
@@ -55,7 +58,6 @@ void main() async {
     );
     print("------------------------------------------");
 
-    const String checkpointPath = "muzero_chess_v1.json";
     await saveModuleParameters(transformer, checkpointPath);
     // 5. Checkpointing
     // if (cycle % 10 == 0) {
@@ -65,8 +67,8 @@ void main() async {
 }
 
 /// Placeholder for weight persistence
-void _saveModelWeights(MuZeroModel model, int cycle) {
-  print("💾 [Checkpoint] Saving model weights for cycle $cycle...");
-  // Implementation depends on your AFT weight format (usually JSON or Binary)
-  // Example: File('weights_cycle_$cycle.json').writeAsStringSync(model.toJson());
-}
+// void _saveModelWeights(MuZeroModel model, int cycle) {
+//   print("💾 [Checkpoint] Saving model weights for cycle $cycle...");
+//   // Implementation depends on your AFT weight format (usually JSON or Binary)
+//   // Example: File('weights_cycle_$cycle.json').writeAsStringSync(model.toJson());
+// }

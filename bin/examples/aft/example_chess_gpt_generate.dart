@@ -73,17 +73,21 @@ Future<void> main() async {
 
   final dummyEnc = Tensor.zeros([1, bigSize]);
 
-  // Use the encodeMove function to create your seed
-  List<int> seedIndices = [encodeMove("<start>"), encodeMove("e2e4")];
+  List<String> moves = ["e2e4", "d2d4", "g1f3", "c2c4", "a2a3"];
 
-  generate(
-    gpt,
-    seedIndices,
-    encodeMove("."), // endId
-    vocabSize,
-    blockSize,
-    dummyEnc,
-  );
+  for (int i = 0; i < moves.length; i++) {
+    // Use the encodeMove function to create your seed
+    List<int> seedIndices = [encodeMove("<start>"), encodeMove(moves[i])];
+
+    generate(
+      gpt,
+      seedIndices,
+      encodeMove("."), // endId
+      vocabSize,
+      blockSize,
+      dummyEnc,
+    );
+  }
 }
 
 void generate(

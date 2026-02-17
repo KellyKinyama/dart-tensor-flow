@@ -35,7 +35,7 @@ Future<void> main() async {
 
   // 1. Load and Parse your dataset (mocking your dataset function)
   // Replace this with your actual dataset(100) call
-  List<List<String>> pgnGames = dataset(100);
+  List<List<String>> pgnGames = dataset(10000);
 
   // Add the <start> and <end> tokens to every game for the model
   final List<List<int>> encodedDataset = pgnGames.map((game) {

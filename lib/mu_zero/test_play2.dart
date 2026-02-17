@@ -1,4 +1,4 @@
-import 'dart:io';
+// import 'dart:io';
 import 'package:bishop/bishop.dart';
 import 'package:dart_tensor_flow/uitils/network_utils.dart';
 import '../transformers/attention_free_transformer/aft_chessformer.dart';
@@ -47,6 +47,8 @@ int encodeMove(Move m, Game game) {
 void main() async {
   // 1. Setup Architecture
   final transformer = TransformerDecoder(vocabSize: 4098, embedSize: 128);
+
+  await loadModuleParameters(transformer, "muzero_chess_v1.json");
   final model = MuZeroModel(transformer, 128);
 
   // 2. Initialize the Search Engine
@@ -54,7 +56,6 @@ void main() async {
 
   // 3. Load Weights
   print("Loading weights...");
-  await loadModuleParameters(transformer, "muzero_chess_v1.json");
 
   // 4. Initialize Bishop Game
   final game = Game(variant: Variant.standard());
